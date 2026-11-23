@@ -38,7 +38,7 @@ export default async function MembersPage({
         meta={`${members.length} thẻ đang cấp, ${expiring.length} thẻ sắp hết hạn`}
         actions={
           <>
-            <Link className="btn btn-quiet" href="/members">
+            <Link className="btn btn-quiet" href="/members/import">
               Nhập danh sách
             </Link>
             <Link className="btn" href="/members/new">

@@ -165,7 +165,13 @@ export default async function LoansPage({
                         <Status tone={late ? "late" : "neutral"}>
                           {late ? "Quá hạn" : "Còn hạn"}
                         </Status>
-                        {!late ? <RenewButton loanId={l.id} /> : null}
+                        {!late ? (
+                          <RenewButton
+                            loanId={l.id}
+                            renewCount={l.renewCount}
+                            maxRenewals={settings.maxRenewals}
+                          />
+                        ) : null}
                         <ReturnButton loanId={l.id} receiptCode={l.receiptCode} />
                       </>
                     )}

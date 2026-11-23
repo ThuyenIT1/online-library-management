@@ -4,7 +4,7 @@ import { useActionState, useMemo, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, Check, Search } from "lucide-react";
 import { issueLoanAction } from "@/app/actions";
-import { EMPTY_RESULT } from "@/lib/action-result";
+import { EMPTY_RESULT, hasError, isSuccess } from "@/lib/action-result";
 import type { ActionResult } from "@/lib/action-result";
 import type { Book, Member } from "@/lib/types";
 
@@ -90,7 +90,7 @@ export function IssueForm({
 
   return (
     <>
-      {state?.ok ? (
+      {isSuccess(state) ? (
         <div className="notice is-ok">
           <Check size={15} strokeWidth={2.2} aria-hidden />
           <div>
@@ -230,7 +230,7 @@ export function IssueForm({
             </div>
           ) : null}
 
-          {state && !state.ok ? (
+          {hasError(state) ? (
             <div className="notice is-bad">
               <AlertTriangle size={15} strokeWidth={2.2} aria-hidden />
               <div>

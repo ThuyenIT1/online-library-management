@@ -3,16 +3,22 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
+  addBookCopies,
+  createBook,
   createMember,
   createReservation,
   issueLoan,
-  markFinePaid,
+  payDebt,
   renewLoan,
   returnLoan,
+  updateBook,
   updateMember,
+  updateReservationStatus,
+  updateSettings,
 } from "@/lib/api";
-import type { MemberInput } from "@/lib/api";
+import type { BookInput, MemberInput } from "@/lib/api";
 import type { ActionResult } from "@/lib/action-result";
+import type { ReservationStatus } from "@/lib/types";
 
 /* ==========================================================================
    Server Actions.
@@ -228,6 +234,7 @@ export async function updateMemberAction(
   try {
     await updateMember(id, input);
     revalidatePath("/members");
+    revalidatePath(`/members/${id}`);
     return { ok: true, message: "Đã cập nhật hồ sơ hội viên." };
   } catch (e) {
     return {
@@ -243,11 +250,26 @@ export async function payFineAction(
   _prev: ActionResult,
   formData: FormData,
 ): Promise<ActionResult> {
-  const id = String(formData.get("fineId") ?? "");
-  if (!id) return { ok: false, message: "Thiếu mã khoản phí." };
+  const fineId = String(formData.get("fineId") ?? "").trim();
+  const loanId = String(formData.get("loanId") ?? "").trim();
+  const amount = Number(formData.get("amount") ?? "0");
+
+  if (!fineId && !loanId) {
+    return { ok: false, message: "Thiếu mã khoản phí." };
+  }
 
   try {
-    await markFinePaid(id);
+    const result = await payDebt({
+      fineId: fineId || null,
+      loanId: loanId || null,
+      amount: Number.isFinite(amount) ? amount : 0,
+    });
+
+    if (!result.ok) {
+      return { ok: false, message: result.reason ?? "Không ghi nhận được phí." };
+    }
+
+    revalidatePath("/members");
     revalidatePath("/loans");
     revalidatePath("/reports");
     return { ok: true, message: "Đã ghi nhận thu phí." };
@@ -275,11 +297,274 @@ export async function reserveBookAction(
       return { ok: false, message: result.reason ?? "Không đặt trước được." };
     }
     revalidatePath("/books");
+    revalidatePath("/reservations");
     return { ok: true, message: "Đã ghi nhận đặt trước." };
   } catch (e) {
     return {
       ok: false,
       message: e instanceof Error ? e.message : "Không đặt trước được.",
+    };
+  }
+}
+
+export async function updateReservationAction(
+  _prev: ActionResult,
+  formData: FormData,
+): Promise<ActionResult> {
+  const id = String(formData.get("id") ?? "");
+  const status = String(formData.get("status") ?? "") as ReservationStatus;
+  if (!id || !status) return { ok: false, message: "Thiếu thông tin lượt đặt trước." };
+
+  try {
+    await updateReservationStatus(id, status);
+    revalidatePath("/reservations");
+    revalidatePath("/books");
+    return { ok: true, message: "Đã cập nhật lượt đặt trước." };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : "Không cập nhật được.",
+    };
+  }
+}
+
+/* ---------------- Sách ---------------- */
+
+export async function createBookAction(
+  _prev: ActionResult,
+  formData: FormData,
+): Promise<ActionResult> {
+  const input = readBookForm(formData);
+  if ("error" in input) return { ok: false, message: input.error };
+
+  const copies = Number(formData.get("copies") ?? "1");
+
+  try {
+    const id = await createBook(
+      input,
+      Number.isFinite(copies) ? Math.max(0, Math.floor(copies)) : 1,
+    );
+    revalidatePath("/books");
+    return { ok: true, message: `Đã nhập đầu sách ${input.title}.`, id };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : "Không nhập được đầu sách.",
+    };
+  }
+}
+
+export async function updateBookAction(
+  _prev: ActionResult,
+  formData: FormData,
+): Promise<ActionResult> {
+  const id = String(formData.get("id") ?? "");
+  const input = readBookForm(formData);
+  if ("error" in input) return { ok: false, message: input.error };
+  if (!id) return { ok: false, message: "Thiếu mã đầu sách." };
+
+  const extraCopies = Number(formData.get("extraCopies") ?? "0");
+
+  try {
+    await updateBook(id, input);
+    if (Number.isFinite(extraCopies) && extraCopies > 0) {
+      await addBookCopies(id, Math.floor(extraCopies));
+    }
+    revalidatePath("/books");
+    revalidatePath(`/books/${id}`);
+    return { ok: true, message: "Đã cập nhật hồ sơ đầu sách." };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : "Không cập nhật được.",
+    };
+  }
+}
+
+/* ---------------- Nhập hội viên hàng loạt ---------------- */
+
+export async function importMembersAction(
+  _prev: ActionResult,
+  formData: FormData,
+): Promise<ActionResult> {
+  const raw = String(formData.get("csv") ?? "").trim();
+  if (!raw) return { ok: false, message: "Chưa có nội dung CSV." };
+
+  const rows = parseCsv(raw);
+  if (rows.length === 0) {
+    return { ok: false, message: "Không đọc được dòng dữ liệu nào từ CSV." };
+  }
+
+  const header = rows[0].map((h) => h.toLowerCase());
+  const hasHeader = header.some((h) =>
+    ["họ tên", "ho ten", "full_name", "tên", "ten"].includes(h),
+  );
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+
+  if (dataRows.length === 0) {
+    return { ok: false, message: "CSV chỉ có dòng tiêu đề, chưa có hội viên nào." };
+  }
+
+  // Bỏ qua dòng tiêu đề nếu có; nếu không thì dùng thứ tự cột cố định.
+  const idx = (names: string[], fallback: number) => {
+    if (!hasHeader) return fallback;
+    const found = names.findIndex((n) => header.includes(n));
+    return found >= 0 ? found : -1;
+  };
+
+  const iName = idx(["họ tên", "ho ten", "full_name", "tên", "ten"], 0);
+  const iEmail = idx(["email", "e-mail"], 1);
+  const iPhone = idx(["điện thoại", "dien thoai", "số điện thoại", "phone"], 2);
+  const iTier = idx(["hạng", "hang", "tier"], 3);
+  const iMax = idx(["hạn mức", "han muc", "max_books"], 4);
+  const iJoined = idx(["ngày cấp", "ngay cap", "joined_on"], 5);
+  const iExpires = idx(["ngày hết hạn", "ngay het han", "expires_on", "hạn"], 6);
+  const iNotes = idx(["ghi chú", "ghi chu", "notes"], 7);
+
+  const created: string[] = [];
+  const failed: string[] = [];
+
+  for (const row of dataRows) {
+    const name = (iName >= 0 ? row[iName] : "").trim();
+    if (!name) continue;
+
+    const expires = (iExpires >= 0 ? row[iExpires] : "").trim();
+    if (!expires) {
+      failed.push(`${name}: thiếu ngày hết hạn`);
+      continue;
+    }
+
+    const tierRaw = (iTier >= 0 ? row[iTier] : "").trim();
+    const tier = (["Thường", "Vàng", "Đọc tại chỗ"] as const).includes(
+      tierRaw as "Thường",
+    )
+      ? (tierRaw as MemberInput["tier"])
+      : "Thường";
+
+    const maxRaw = Number((iMax >= 0 ? row[iMax] : "").trim() || "5");
+    const maxBooks = tier === "Đọc tại chỗ" ? 0 : Number.isFinite(maxRaw) ? maxRaw : 5;
+
+    try {
+      await createMember({
+        fullName: name,
+        email: (iEmail >= 0 ? row[iEmail] : "").trim() || null,
+        phone: (iPhone >= 0 ? row[iPhone] : "").trim() || null,
+        tier,
+        maxBooks,
+        joinedOn:
+          (iJoined >= 0 ? row[iJoined] : "").trim() ||
+          new Date().toISOString().slice(0, 10),
+        expiresOn: expires,
+        status: "active",
+        notes: (iNotes >= 0 ? row[iNotes] : "").trim() || null,
+      });
+      created.push(name);
+    } catch (e) {
+      failed.push(`${name}: ${e instanceof Error ? e.message : "lỗi không rõ"}`);
+    }
+  }
+
+  revalidatePath("/members");
+
+  if (created.length === 0) {
+    return {
+      ok: false,
+      message: `Không tạo được hội viên nào. ${failed.slice(0, 3).join("; ")}`,
+    };
+  }
+
+  const failedNote = failed.length
+    ? ` ${failed.length} dòng bị bỏ qua (${failed.slice(0, 2).join("; ")}).`
+    : "";
+
+  return {
+    ok: true,
+    message: `Đã cấp thẻ cho ${created.length} hội viên.${failedNote}`,
+  };
+}
+
+/** Tách nội dung CSV thành mảng hàng, tự xử lý dấu nháy kép. */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cell += ch;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (ch === "\n") {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (ch !== "\r") {
+      cell += ch;
+    }
+  }
+
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return rows.filter((r) => r.some((c) => c.trim().length > 0));
+}
+
+/* ---------------- Cài đặt ---------------- */
+
+export async function updateSettingsAction(
+  _prev: ActionResult,
+  formData: FormData,
+): Promise<ActionResult> {
+  const name = String(formData.get("name") ?? "").trim();
+  const loanDays = Number(formData.get("loanDays") ?? "14");
+  const finePerDay = Number(formData.get("finePerDay") ?? "17000");
+  const maxRenewals = Number(formData.get("maxRenewals") ?? "1");
+
+  if (!name) return { ok: false, message: "Cần nhập tên thư viện." };
+  if (!Number.isFinite(loanDays) || loanDays <= 0) {
+    return { ok: false, message: "Số ngày mượn phải lớn hơn 0." };
+  }
+  if (!Number.isFinite(finePerDay) || finePerDay < 0) {
+    return { ok: false, message: "Phí trễ hạn không được âm." };
+  }
+  if (!Number.isFinite(maxRenewals) || maxRenewals < 0) {
+    return { ok: false, message: "Số lần gia hạn không được âm." };
+  }
+
+  try {
+    await updateSettings({
+      name,
+      loanDays: Math.floor(loanDays),
+      finePerDay: Math.floor(finePerDay),
+      maxRenewals: Math.floor(maxRenewals),
+    });
+    revalidatePath("/", "layout");
+    return { ok: true, message: "Đã lưu cấu hình thư viện." };
+  } catch (e) {
+    return {
+      ok: false,
+      message: e instanceof Error ? e.message : "Không lưu được cấu hình.",
     };
   }
 }
@@ -305,5 +590,33 @@ function readMemberForm(formData: FormData): MemberInput | { error: string } {
     expiresOn,
     status: String(formData.get("status") ?? "active") as MemberInput["status"],
     notes: String(formData.get("notes") ?? "").trim() || null,
+  };
+}
+
+function readBookForm(formData: FormData): BookInput | { error: string } {
+  const code = String(formData.get("code") ?? "").trim();
+  const title = String(formData.get("title") ?? "").trim();
+  const author = String(formData.get("author") ?? "").trim();
+  const subject = String(formData.get("subject") ?? "").trim();
+
+  if (!code) return { error: "Cần nhập mã sách." };
+  if (!title) return { error: "Cần nhập tên sách." };
+  if (!author) return { error: "Cần nhập tên tác giả." };
+  if (!subject) return { error: "Cần nhập chủ đề." };
+
+  const year = Number(formData.get("year") ?? "");
+  const pages = Number(formData.get("pages") ?? "");
+
+  return {
+    code,
+    title,
+    author,
+    subject,
+    publisher: String(formData.get("publisher") ?? "").trim() || null,
+    year: Number.isFinite(year) && year > 0 ? Math.floor(year) : null,
+    pages: Number.isFinite(pages) && pages > 0 ? Math.floor(pages) : null,
+    shelf: String(formData.get("shelf") ?? "").trim() || null,
+    keywords: String(formData.get("keywords") ?? "").trim() || null,
+    summary: String(formData.get("summary") ?? "").trim() || null,
   };
 }

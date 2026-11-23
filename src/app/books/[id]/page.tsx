@@ -3,7 +3,14 @@ import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { PageHead, Row, Rows, SectionTitle, Status } from "@/components/ui";
-import { getBook, listBookCopies, listLoans, listMembers } from "@/lib/api";
+import { ReserveBookButton } from "@/components/reserve-book-button";
+import {
+  getBook,
+  listBookCopies,
+  listLoans,
+  listMembers,
+  listReservations,
+} from "@/lib/api";
 import { formatDate, todayISO } from "@/lib/types";
 
 export default async function BookDetailPage({
@@ -17,16 +24,22 @@ export default async function BookDetailPage({
   const book = await getBook(id);
   if (!book) notFound();
 
-  const [copies, loans, members] = await Promise.all([
+  const [copies, loans, members, reservations] = await Promise.all([
     listBookCopies(book.id),
     listLoans(today),
     listMembers(),
+    listReservations(),
   ]);
 
   const activeLoans = loans.filter((l) => l.bookId === book.id && !l.returnedAt);
   const pastLoans = loans.filter((l) => l.bookId === book.id && l.returnedAt);
 
   const memberById = new Map(members.map((m) => [m.id, m]));
+
+  // Các lượt đặt trước còn hiệu lực của cuốn này.
+  const openReservations = reservations.filter(
+    (r) => r.bookId === book.id && r.status !== "cancelled",
+  );
 
   return (
     <AppShell>
@@ -49,7 +62,9 @@ export default async function BookDetailPage({
         }
         actions={
           <>
-            <button className="btn btn-quiet">Sửa hồ sơ</button>
+            <Link className="btn btn-quiet" href={`/books/${book.id}/edit`}>
+              Sửa hồ sơ
+            </Link>
             <Link className="btn" href="/loans/issue">
               Cho mượn
             </Link>
@@ -181,6 +196,34 @@ export default async function BookDetailPage({
                 );
               })}
             </ul>
+          </div>
+
+          <div className="copy-list">
+            <h3>Đặt trước</h3>
+            {openReservations.length === 0 ? (
+              <p className="muted">Chưa có lượt đặt trước nào.</p>
+            ) : (
+              <ul>
+                {openReservations.map((r) => (
+                  <li key={r.id}>
+                    <span>
+                      {memberById.get(r.memberId)?.name ?? "Hội viên đã xoá"}
+                    </span>
+                    <Status tone={r.status === "ready" ? "ok" : "neutral"}>
+                      {r.status === "waiting"
+                        ? "Đang chờ"
+                        : r.status === "ready"
+                          ? "Sẵn sàng"
+                          : "Đã lấy"}
+                    </Status>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <ReserveBookButton
+              bookId={book.id}
+              members={members.map((m) => ({ id: m.id, name: m.name, code: m.code }))}
+            />
           </div>
         </aside>
       </div>

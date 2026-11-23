@@ -4,7 +4,7 @@ import { useActionState } from "react";
 import Link from "next/link";
 import { useFormStatus } from "react-dom";
 import { signUpAction } from "@/app/actions";
-import { EMPTY_RESULT } from "@/lib/action-result";
+import { EMPTY_RESULT, hasError } from "@/lib/action-result";
 
 function SubmitButton() {
   const { pending } = useFormStatus();
@@ -71,7 +71,7 @@ export default function JoinPage() {
             ) : null}
           </div>
 
-          {state && !state.ok && !state.fieldErrors ? (
+          {hasError(state) && !state.fieldErrors ? (
             <p className="form-error" role="alert">
               {state.message}
             </p>

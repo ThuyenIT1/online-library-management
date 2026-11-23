@@ -3,8 +3,9 @@ import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { PageHead, Row, Rows, SectionTitle, Status } from "@/components/ui";
-import { getMember, getSettings, listLoans } from "@/lib/api";
-import { daysLate, formatDate, isMembershipValid, todayISO } from "@/lib/types";
+import { PayFineButton } from "@/components/fine-actions";
+import { getMember, listDebts, listLoans } from "@/lib/api";
+import { formatDate, formatVNDFull, isMembershipValid, todayISO } from "@/lib/types";
 
 export default async function MemberDetailPage({
   params,
@@ -17,16 +18,17 @@ export default async function MemberDetailPage({
   const member = await getMember(id);
   if (!member) notFound();
 
-  const [loans, settings] = await Promise.all([listLoans(today), getSettings()]);
+  const [loans, debts] = await Promise.all([
+    listLoans(today),
+    listDebts({ memberId: id }),
+  ]);
 
   const own = loans.filter((l) => l.memberId === member.id);
   const active = own.filter((l) => !l.returnedAt);
   const returned = own.filter((l) => l.returnedAt);
-  const overdue = active.filter((l) => l.status === "overdue");
-  const fineTotal = overdue.reduce(
-    (s, l) => s + daysLate(l.dueAt, today) * settings.finePerDay,
-    0,
-  );
+
+  const unpaid = debts.filter((d) => !d.paid);
+  const fineTotal = unpaid.reduce((s, d) => s + d.amount, 0);
 
   const valid = isMembershipValid(member.expiryDate, today);
 
@@ -54,7 +56,7 @@ export default async function MemberDetailPage({
         }
         actions={
           <>
-            <Link className="btn btn-quiet" href={`/members/${member.id}`}>
+            <Link className="btn btn-quiet" href={`/members/${member.id}/edit`}>
               Sửa hồ sơ
             </Link>
             <Link className="btn" href="/loans/issue">
@@ -148,14 +150,41 @@ export default async function MemberDetailPage({
           <div className="copy-list">
             <h3>Phí trễ hạn đang nợ</h3>
             <div className="fine-summary">
-              <span className="num">{fineTotal.toLocaleString("vi-VN")} đ</span>
+              <span className="num">{formatVNDFull(fineTotal)}</span>
               <span className="m">
-                {overdue.length > 0
-                  ? `từ ${overdue.length} cuốn quá hạn`
+                {unpaid.length > 0
+                  ? `từ ${unpaid.length} khoản nợ`
                   : "Không có khoản nợ nào"}
               </span>
             </div>
+            {unpaid.length > 0 ? (
+              <div className="debt-list">
+                {unpaid.map((d) => (
+                  <div key={d.fineId ?? d.loanId ?? d.receiptCode} className="debt-row">
+                    <span className="code">{d.receiptCode}</span>
+                    <span className="who">
+                      {d.bookTitle}
+                      <br />
+                      trễ {d.daysLate} ngày
+                    </span>
+                    <span className="num alert">{formatVNDFull(d.amount)}</span>
+                    <PayFineButton
+                      fineId={d.fineId}
+                      loanId={d.loanId}
+                      amount={d.amount}
+                    />
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
+
+          {member.notes ? (
+            <div className="copy-list">
+              <h3>Ghi chú</h3>
+              <p className="muted">{member.notes}</p>
+            </div>
+          ) : null}
         </aside>
       </div>
     </AppShell>

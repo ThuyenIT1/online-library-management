@@ -528,7 +528,7 @@ code.code {
 
 .fine-row {
   display: grid;
-  grid-template-columns: 128px minmax(0, 1fr) 74px 96px;
+  grid-template-columns: 128px minmax(0, 1fr) 74px 96px auto;
   gap: 14px;
   align-items: baseline;
   padding: 10px 2px;
@@ -550,6 +550,12 @@ code.code {
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+.fine-row .btn,
+.fine-row .status.is-ok-inline {
+  justify-self: end;
+  align-self: center;
 }
 
 @media (max-width: 1180px) {
@@ -639,6 +645,43 @@ code.code {
 .btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* ---------- Danh sách khoản nợ trong hồ sơ hội viên ---------- */
+
+.debt-list {
+  margin-top: 12px;
+  border-top: 1px solid var(--color-rule);
+}
+
+.debt-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--color-rule);
+  font-size: 12.5px;
+}
+
+.debt-row .who {
+  font-size: 12.5px;
+  color: var(--color-graphite);
+}
+
+.debt-row .num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+}
+
+.debt-row .num.alert {
+  color: var(--color-stamp);
+}
+
+.debt-row .btn {
+  grid-column: 1 / -1;
+  justify-self: start;
 }
 
 @media (max-width: 1180px) {
@@ -854,6 +897,124 @@ code.code {
   width: 290px;
   color: #9fb0be;
   font-size: 13px;
+}
+
+.search:focus-within {
+  border-color: #56687a;
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  color: var(--color-stock);
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+
+.search input::placeholder {
+  color: #7e8f9d;
+}
+
+.search input:focus {
+  outline: none;
+}
+
+/* Vòng tròn đếm thông báo trên nút chuông */
+.notice-wrap {
+  position: relative;
+  flex: none;
+}
+
+.notice-dot {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--color-stamp);
+  color: #fdeeea;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* Bảng thông báo trượt xuống từ nút chuông */
+.notice-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--color-stock);
+  border: 1px solid var(--color-rule);
+  border-radius: 2px;
+  box-shadow: 0 8px 24px rgba(23, 33, 44, 0.16);
+  z-index: 40;
+  padding: 4px 0;
+}
+
+.notice-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.notice-head strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.notice-head span {
+  font-size: 11.5px;
+  color: var(--color-graphite);
+}
+
+.notice-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.notice-panel li a {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  color: var(--color-ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--color-stock);
+}
+
+.notice-panel li a:hover {
+  background: var(--color-slate);
+}
+
+.notice-panel li a i {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--color-catalogue);
+}
+
+.notice-panel li a i.is-late {
+  background: var(--color-stamp);
+}
+
+.notice-panel .muted {
+  padding: 14px;
+  margin: 0;
 }
 
 .search kbd {

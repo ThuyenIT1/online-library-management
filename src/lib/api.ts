@@ -3,6 +3,7 @@ import type { Database, Tables } from "@/lib/supabase/database.types";
 import type {
   Book,
   BookCopy,
+  Debt,
   Fine,
   LibrarySettings,
   Loan,
@@ -58,6 +59,24 @@ export async function getSettings(): Promise<LibrarySettings> {
     finePerDay: data.fine_per_day,
     maxRenewals: data.max_renewals,
   };
+}
+
+/** Cập nhật cấu hình thư viện. */
+export async function updateSettings(
+  input: LibrarySettings,
+): Promise<void> {
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("library_settings")
+    .update({
+      name: input.name,
+      loan_days: input.loanDays,
+      fine_per_day: input.finePerDay,
+      max_renewals: input.maxRenewals,
+    })
+    .eq("id", true);
+
+  if (error) throw error;
 }
 
 /* --------------------------------------------------------------------------
@@ -128,6 +147,121 @@ export async function getBook(id: string): Promise<Book | null> {
   return data ? toBook(data as BookStockRow) : null;
 }
 
+export type BookInput = {
+  code: string;
+  title: string;
+  author: string;
+  subject: string;
+  publisher: string | null;
+  year: number | null;
+  pages: number | null;
+  shelf: string | null;
+  keywords: string | null;
+  summary: string | null;
+};
+
+/** Tạo đầu sách mới kèm N bản vật lý. */
+export async function createBook(
+  input: BookInput,
+  copyCount: number,
+): Promise<string> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("books")
+    .insert({
+      code: input.code,
+      title: input.title,
+      author: input.author,
+      subject: input.subject,
+      publisher: input.publisher,
+      publish_year: input.year,
+      page_count: input.pages,
+      shelf: input.shelf,
+      keywords: input.keywords,
+      summary: input.summary,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    if (error.code === "23505") {
+      throw new Error(`Mã sách ${input.code} đã tồn tại.`);
+    }
+    throw error;
+  }
+
+  const copies = Math.max(0, Math.floor(copyCount));
+  if (copies > 0) {
+    const rows = Array.from({ length: copies }, (_, i) => ({
+      book_id: data.id,
+      copy_label: `A${i + 1}`,
+      condition: "Tốt" as const,
+    }));
+    const { error: copyErr } = await supabase.from("book_copies").insert(rows);
+    if (copyErr) throw copyErr;
+  }
+
+  return data.id;
+}
+
+/** Cập nhật hồ sơ đầu sách. */
+export async function updateBook(id: string, input: BookInput): Promise<void> {
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("books")
+    .update({
+      code: input.code,
+      title: input.title,
+      author: input.author,
+      subject: input.subject,
+      publisher: input.publisher,
+      publish_year: input.year,
+      page_count: input.pages,
+      shelf: input.shelf,
+      keywords: input.keywords,
+      summary: input.summary,
+    })
+    .eq("id", id);
+
+  if (error) {
+    if (error.code === "23505") {
+      throw new Error(`Mã sách ${input.code} đã tồn tại.`);
+    }
+    throw error;
+  }
+}
+
+/** Thêm bản vật lý mới cho một đầu sách. */
+export async function addBookCopies(
+  bookId: string,
+  count: number,
+): Promise<number> {
+  const supabase = await createClient();
+  const copies = Math.max(0, Math.floor(count));
+  if (copies === 0) return 0;
+
+  const { data: existing } = await supabase
+    .from("book_copies")
+    .select("copy_label")
+    .eq("book_id", bookId);
+
+  const used = new Set((existing ?? []).map((c) => c.copy_label));
+  let next = 1;
+  const labels: string[] = [];
+  while (labels.length < copies) {
+    const label = `A${next++}`;
+    if (!used.has(label)) labels.push(label);
+  }
+
+  const { error } = await supabase
+    .from("book_copies")
+    .insert(labels.map((copy_label) => ({ book_id: bookId, copy_label })));
+
+  if (error) throw error;
+  return labels.length;
+}
+
 export async function listBookCopies(bookId: string): Promise<BookCopy[]> {
   const supabase = await createClient();
   const { data, error } = await supabase
@@ -181,6 +315,7 @@ function toMember(r: MemberRow, activeLoans: number): Member {
     status: r.status,
     maxBooks: r.max_books,
     borrowCount: activeLoans,
+    notes: r.notes,
   };
 }
 
@@ -314,7 +449,7 @@ export type LoanWithRefs = LoanRow & {
   members: { card_code: string; full_name: string } | null;
 };
 
-function toLoan(r: LoanWithRefs, today: string): Loan {
+function toLoan(r: LoanWithRefs, today: string, renewCount = 0): Loan {
   const late = !r.returned_on && daysLate(r.due_on, today) > 0;
   const status: LoanStatus = r.returned_on
     ? "returned"
@@ -334,6 +469,7 @@ function toLoan(r: LoanWithRefs, today: string): Loan {
     status,
     copyLabel: r.book_copies?.copy_label ?? "",
     fineAmount: r.fine_amount,
+    renewCount,
   };
 }
 
@@ -345,16 +481,44 @@ const LOAN_SELECT = `
   members ( card_code, full_name )
 `;
 
+/**
+ * Đếm số lần gia hạn của từng phiếu.
+ *
+ * Bảng loans không lưu số lần gia hạn, nên ta đọc từ audit_log, nơi mỗi
+ * lần gia hạn đều ghi một dòng action = 'renew' kèm entity_id là mã phiếu.
+ * Kết quả trả về theo mã phiếu (receipt_code).
+ */
+async function countRenewals(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+): Promise<Map<string, number>> {
+  const { data } = await supabase
+    .from("audit_log")
+    .select("entity_id")
+    .eq("action", "renew")
+    .eq("entity", "loan");
+
+  const counts = new Map<string, number>();
+  for (const row of data ?? []) {
+    const id = row.entity_id;
+    if (!id) continue;
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
+}
+
 export async function listLoans(today = todayISO()): Promise<Loan[]> {
   const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("loans")
-    .select(LOAN_SELECT)
-    .order("borrowed_on", { ascending: false });
+  const [{ data, error }, renewals] = await Promise.all([
+    supabase
+      .from("loans")
+      .select(LOAN_SELECT)
+      .order("borrowed_on", { ascending: false }),
+    countRenewals(supabase),
+  ]);
 
   if (error) throw error;
   return ((data ?? []) as unknown as LoanWithRefs[]).map((r) =>
-    toLoan(r, today),
+    toLoan(r, today, renewals.get(r.receipt_code) ?? 0),
   );
 }
 
@@ -597,6 +761,19 @@ export async function renewLoan(
     return { ok: false, reason: "Phiếu đã quá hạn, cần thu phí rồi mượn lại." };
   }
 
+  // Chỉ được gia hạn tối đa `max_renewals` lần, tính từ nhật ký thao tác.
+  const renewals = await countRenewals(supabase);
+  const used = renewals.get(loan.receipt_code) ?? 0;
+  if (used >= settings.maxRenewals) {
+    return {
+      ok: false,
+      reason:
+        settings.maxRenewals === 0
+          ? "Cấu hình thư viện không cho gia hạn."
+          : `Phiếu đã gia hạn ${used}/${settings.maxRenewals} lần, không gia hạn thêm được.`,
+    };
+  }
+
   const dueOn = addDays(loan.due_on, settings.loanDays);
   const { error } = await supabase
     .from("loans")
@@ -605,7 +782,10 @@ export async function renewLoan(
 
   if (error) throw error;
 
-  await writeAudit(supabase, "renew", "loan", loan.receipt_code, { dueOn });
+  await writeAudit(supabase, "renew", "loan", loan.receipt_code, {
+    dueOn,
+    renewal: used + 1,
+  });
   return { ok: true, dueOn };
 }
 
@@ -633,6 +813,172 @@ export async function listFines(): Promise<Fine[]> {
   }));
 }
 
+/**
+ * Bảng nợ tổng hợp của thư viện.
+ *
+ * Mỗi khoản nợ tương ứng với MỘT phiếu mượn:
+ *  - Phiếu đã trả trễ hạn: nợ lấy từ dòng phí trong bảng `fines`.
+ *  - Phiếu còn đang mượn nhưng đã quá hạn: nợ tính theo ngày trễ tích luỹ.
+ *
+ * Với phiếu đang mượn quá hạn, nợ còn lại = tổng phí tích luỹ − tổng đã thu
+ * cho chính phiếu đó. Nhờ vậy thủ thư thu phí một lần rồi vẫn thấy khoản
+ * nợ còn lại tăng dần theo ngày, thay vì bị tính trùng.
+ *
+ * Dòng phí không gắn với phiếu nào (loan_id null) được giữ nguyên như một
+ * khoản nợ độc lập — đây là trường hợp dữ liệu mồi cũ trong bảng `fines`.
+ */
+export async function listDebts(options?: {
+  memberId?: string;
+  onlyUnpaid?: boolean;
+}): Promise<Debt[]> {
+  const supabase = await createClient();
+  const today = todayISO();
+  const settings = await getSettings();
+
+  const [{ data: fineRows, error: finesErr }, loans, members, books] =
+    await Promise.all([
+      supabase.from("fines").select("*").order("created_at", { ascending: false }),
+      listLoans(today),
+      listMembers(),
+      listBooks(),
+    ]);
+
+  if (finesErr) throw finesErr;
+
+  const memberById = new Map(members.map((m) => [m.id, m]));
+  const bookById = new Map(books.map((b) => [b.id, b]));
+  const loanById = new Map(loans.map((l) => [l.id, l]));
+
+  const debts: Debt[] = [];
+
+  /** Thông tin phiếu và hội viên để dựng nhãn hiển thị. */
+  const describe = (loan: Loan | undefined, memberId: string) => {
+    const member = memberById.get(memberId);
+    return {
+      receiptCode: loan?.receiptCode ?? "—",
+      memberName: member?.name ?? "Hội viên đã xoá",
+      memberCode: member?.code ?? "",
+      bookTitle: loan
+        ? (bookById.get(loan.bookId)?.title ?? "Sách đã xoá")
+        : "—",
+    };
+  };
+
+  // Gom dòng phí theo phiếu. Dòng phí không có loan_id thì giữ riêng.
+  const finesByLoan = new Map<string, FineRow[]>();
+  const looseFines: FineRow[] = [];
+
+  for (const f of (fineRows ?? []) as FineRow[]) {
+    if (f.loan_id && loanById.has(f.loan_id)) {
+      const list = finesByLoan.get(f.loan_id) ?? [];
+      list.push(f);
+      finesByLoan.set(f.loan_id, list);
+    } else {
+      looseFines.push(f);
+    }
+  }
+
+  // Dòng phí rời rạc: hiện thành từng khoản nợ riêng.
+  for (const f of looseFines) {
+    debts.push({
+      fineId: f.id,
+      loanId: null,
+      ...describe(undefined, f.member_id),
+      memberId: f.member_id,
+      daysLate: f.days_late,
+      amount: f.amount,
+      paid: f.paid,
+      paidOn: f.paid_on,
+    });
+  }
+
+  // Duyệt từng phiếu để gom nợ.
+  for (const l of loans) {
+    const chargeRows = finesByLoan.get(l.id) ?? [];
+    const unpaidCharge = chargeRows.find((f) => !f.paid);
+    const paidTotal = chargeRows
+      .filter((f) => f.paid)
+      .reduce((s, f) => s + f.amount, 0);
+
+    // Phiếu đã trả: nợ là các dòng phí ghi lúc trả sách.
+    if (l.returnedAt) {
+      for (const f of chargeRows) {
+        debts.push({
+          fineId: f.id,
+          loanId: l.id,
+          ...describe(l, l.memberId),
+          memberId: l.memberId,
+          daysLate: f.days_late,
+          amount: f.amount,
+          paid: f.paid,
+          paidOn: f.paid_on,
+        });
+      }
+      continue;
+    }
+
+    // Phiếu còn mượn. Khoản phí đã ghi nhận thì lấy dòng phí đó.
+    if (unpaidCharge) {
+      debts.push({
+        fineId: unpaidCharge.id,
+        loanId: l.id,
+        ...describe(l, l.memberId),
+        memberId: l.memberId,
+        daysLate: unpaidCharge.days_late,
+        amount: unpaidCharge.amount,
+        paid: false,
+        paidOn: null,
+      });
+    } else if (l.status === "overdue") {
+      // Chưa có khoản phí: tính theo ngày trễ, trừ phần đã thu trước đó.
+      const accrued = daysLate(l.dueAt, today) * settings.finePerDay;
+      const net = accrued - paidTotal;
+      if (net > 0) {
+        debts.push({
+          fineId: null,
+          loanId: l.id,
+          ...describe(l, l.memberId),
+          memberId: l.memberId,
+          daysLate: daysLate(l.dueAt, today),
+          amount: net,
+          paid: false,
+          paidOn: null,
+        });
+      }
+    }
+
+    // Các dòng phí đã thu của phiếu này hiện ở mục "Đã thu phí".
+    for (const f of chargeRows) {
+      if (!f.paid) continue;
+      debts.push({
+        fineId: f.id,
+        loanId: l.id,
+        ...describe(l, l.memberId),
+        memberId: l.memberId,
+        daysLate: f.days_late,
+        amount: f.amount,
+        paid: true,
+        paidOn: f.paid_on,
+      });
+    }
+  }
+
+  let result = debts;
+
+  if (options?.memberId) {
+    result = result.filter((d) => d.memberId === options.memberId);
+  }
+  if (options?.onlyUnpaid) {
+    result = result.filter((d) => !d.paid);
+  }
+
+  // Nợ chưa thu trước, nợ đã thu sau.
+  return result.sort((a, b) => {
+    if (a.paid !== b.paid) return a.paid ? 1 : -1;
+    return b.amount - a.amount;
+  });
+}
+
 export async function markFinePaid(id: string): Promise<void> {
   const supabase = await createClient();
   const { error } = await supabase
@@ -641,6 +987,77 @@ export async function markFinePaid(id: string): Promise<void> {
     .eq("id", id);
 
   if (error) throw error;
+}
+
+/**
+ * Ghi nhận thu phí cho một khoản nợ.
+ *
+ * Hai trường hợp:
+ *  - Có dòng phí sẵn: đánh dấu đã thu.
+ *  - Chưa có dòng phí (phiếu đang mượn quá hạn): tạo dòng phí đã thu với
+ *    số tiền bằng phần nợ còn lại.
+ */
+export async function payDebt(
+  input: { fineId: string | null; loanId: string | null; amount: number },
+): Promise<{ ok: boolean; reason?: string }> {
+  const supabase = await createClient();
+  const today = todayISO();
+
+  if (input.fineId) {
+    await markFinePaid(input.fineId);
+    return { ok: true };
+  }
+
+  if (!input.loanId) {
+    return { ok: false, reason: "Không xác định được khoản nợ cần thu." };
+  }
+  if (input.amount <= 0) {
+    return { ok: false, reason: "Khoản nợ này không còn tiền phải thu." };
+  }
+
+  const { data: loan, error: readErr } = await supabase
+    .from("loans")
+    .select("id, receipt_code, member_id, due_on")
+    .eq("id", input.loanId)
+    .maybeSingle();
+
+  if (readErr) throw readErr;
+  if (!loan) return { ok: false, reason: "Không tìm thấy phiếu." };
+
+  // Đã có dòng phí cho phiếu này thì cộng thêm vào dòng đó, tránh sinh
+  // nhiều dòng phí cho cùng một phiếu.
+  const { data: existing } = await supabase
+    .from("fines")
+    .select("id, amount, paid")
+    .eq("loan_id", loan.id)
+    .eq("paid", false)
+    .maybeSingle();
+
+  if (existing) {
+    const { error } = await supabase
+      .from("fines")
+      .update({
+        amount: existing.amount + input.amount,
+        paid: true,
+        paid_on: today,
+      })
+      .eq("id", existing.id);
+
+    if (error) throw error;
+    return { ok: true };
+  }
+
+  const { error } = await supabase.from("fines").insert({
+    loan_id: loan.id,
+    member_id: loan.member_id,
+    days_late: daysLate(loan.due_on, today),
+    amount: input.amount,
+    paid: true,
+    paid_on: today,
+  });
+
+  if (error) throw error;
+  return { ok: true };
 }
 
 export async function listReservations(): Promise<Reservation[]> {
@@ -677,6 +1094,20 @@ export async function createReservation(
     throw error;
   }
   return { ok: true };
+}
+
+/** Đổi trạng thái một lượt đặt trước. */
+export async function updateReservationStatus(
+  id: string,
+  status: Reservation["status"],
+): Promise<void> {
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("reservations")
+    .update({ status })
+    .eq("id", id);
+
+  if (error) throw error;
 }
 
 /* --------------------------------------------------------------------------

@@ -1,7 +1,32 @@
+import Link from "next/link";
 import { AppShell } from "@/components/app-shell";
 import { PageHead, SectionTitle } from "@/components/ui";
-import { getBook, getSettings, getStats, listLoans } from "@/lib/api";
-import { daysLate, formatVND, formatVNDFull, todayISO } from "@/lib/types";
+import { PayFineButton } from "@/components/fine-actions";
+import { PrintButton } from "@/components/print-button";
+import { getBook, getSettings, getStats, listDebts, listLoans } from "@/lib/api";
+import {
+  daysLate,
+  formatDateShort,
+  formatVND,
+  formatVNDFull,
+  todayISO,
+} from "@/lib/types";
+
+/* ---------------- Các kỳ báo cáo ---------------- */
+
+const PERIODS = [
+  { key: 30, days: 30, label: "30 ngày" },
+  { key: 90, days: 90, label: "90 ngày" },
+  { key: 365, days: 365, label: "12 tháng" },
+] as const;
+
+/** Lùi ngày, dùng cho mốc đầu kỳ. */
+function shiftDays(iso: string, delta: number): string {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + delta);
+  const off = d.getTimezoneOffset() * 60_000;
+  return new Date(d.getTime() - off).toISOString().slice(0, 10);
+}
 
 /* ---------------- Biểu đồ thanh kẻ ---------------- */
 
@@ -38,17 +63,36 @@ function BarChart({
   );
 }
 
-export default async function ReportsPage() {
+export default async function ReportsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ period?: string }>;
+}) {
+  const sp = await searchParams;
   const today = todayISO();
 
-  const [stats, loans, settings] = await Promise.all([
+  const period =
+    PERIODS.find((p) => String(p.key) === sp.period) ?? PERIODS[0];
+  const from = shiftDays(today, -period.days);
+
+  const [stats, loans, settings, debts] = await Promise.all([
     getStats(),
     listLoans(today),
     getSettings(),
+    listDebts(),
   ]);
 
   const active = loans.filter((l) => !l.returnedAt);
   const overdue = active.filter((l) => l.status === "overdue");
+
+  // Chỉ tính lưu lượng trong kỳ đã chọn.
+  const periodLoans = loans.filter(
+    (l) => l.borrowedAt >= from && l.borrowedAt <= today,
+  );
+  const periodReturns = loans.filter(
+    (l) => l.returnedAt !== null && l.returnedAt >= from && l.returnedAt <= today,
+  );
+  const periodOverdue = periodLoans.filter((l) => l.status === "overdue");
 
   // Số bản theo chủ đề, tính từ view book_stock.
   const subjectRows = stats.bySubject
@@ -64,12 +108,6 @@ export default async function ReportsPage() {
 
   const bookTitles = await loadTitles(stats.borrowCount.map((b) => b.bookId));
 
-  // Tải tên sách và tên hội viên một lần cho danh sách phí trễ hạn.
-  const { listBooks, listMembers } = await import("@/lib/api");
-  const [allBooks, allMembers] = await Promise.all([listBooks(), listMembers()]);
-  const titleOf = new Map(allBooks.map((b) => [b.id, b.title]));
-  const nameOf = new Map(allMembers.map((m) => [m.id, m.name]));
-
   const borrowRows = stats.borrowCount
     .map((b) => ({
       cat: bookTitles.get(b.bookId) ?? "Sách đã xoá",
@@ -79,10 +117,8 @@ export default async function ReportsPage() {
     .slice(0, 6);
   const borrowMax = Math.max(...borrowRows.map((r) => r.value), 1);
 
-  const fineTotal = overdue.reduce(
-    (s, l) => s + daysLate(l.dueAt, today) * settings.finePerDay,
-    0,
-  );
+  const unpaidDebts = debts.filter((d) => !d.paid);
+  const fineTotal = unpaidDebts.reduce((s, d) => s + d.amount, 0);
   const avgLate = overdue.length
     ? Math.round(
         overdue.reduce((s, l) => s + daysLate(l.dueAt, today), 0) / overdue.length,
@@ -93,14 +129,30 @@ export default async function ReportsPage() {
     <AppShell>
       <PageHead
         title="Báo cáo"
-        meta="Lưu lượng mượn trả, tỉ lệ quá hạn, doanh thu phí"
+        meta={`Lưu lượng mượn trả, tỉ lệ quá hạn, doanh thu phí · ${period.label}`}
         actions={
           <>
-            <button className="btn btn-quiet">Kỳ 30 ngày</button>
-            <button className="btn">In báo cáo</button>
+            <Link className="btn btn-quiet" href="/reports/export?period=30&kind=loans">
+              Xuất báo cáo
+            </Link>
+            <PrintButton />
           </>
         }
       />
+
+      <div className="tabs" role="tablist">
+        {PERIODS.map((p) => (
+          <Link
+            key={p.key}
+            href={p.key === 30 ? "/reports" : `/reports?period=${p.key}`}
+            role="tab"
+            aria-selected={period.key === p.key}
+            className="tab-btn"
+          >
+            {p.label}
+          </Link>
+        ))}
+      </div>
 
       <section className="section">
         <SectionTitle>Tổng quan</SectionTitle>
@@ -120,6 +172,33 @@ export default async function ReportsPage() {
           <div>
             <span className="n">{formatVND(fineTotal)}</span>
             <span className="label">Phí trễ hạn đang nợ</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="section">
+        <SectionTitle>Lưu lượng trong kỳ</SectionTitle>
+        <div className="counts counts-4">
+          <div>
+            <span className="n">{periodLoans.length}</span>
+            <span className="label">Phiếu mượn phát sinh</span>
+          </div>
+          <div>
+            <span className="n">{periodReturns.length}</span>
+            <span className="label">Phiếu trả trong kỳ</span>
+          </div>
+          <div>
+            <span className="n alert">{periodOverdue.length}</span>
+            <span className="label">Trong đó quá hạn</span>
+          </div>
+          <div>
+            <span className="n">
+              {periodLoans.length
+                ? Math.round((periodReturns.length / periodLoans.length) * 100)
+                : 0}
+              %
+            </span>
+            <span className="label">Tỉ lệ trả trong kỳ</span>
           </div>
         </div>
       </section>
@@ -178,27 +257,57 @@ export default async function ReportsPage() {
           </div>
 
           <div className="fine-list">
-            {overdue.map((l) => {
-              const late = daysLate(l.dueAt, today);
-              return (
-                <div key={l.id} className="fine-row">
-                  <span className="code">{l.receiptCode}</span>
-                  <span className="who">
-                    {nameOf.get(l.memberId) ?? "Hội viên đã xoá"}
-                    <br />
-                    {titleOf.get(l.bookId) ?? "Sách đã xoá"}
-                  </span>
-                  <span className="who code">{late} ngày</span>
-                  <span className="num alert">
-                    {formatVNDFull(late * settings.finePerDay)}
-                  </span>
-                </div>
-              );
-            })}
-            {overdue.length === 0 ? (
+            {unpaidDebts.map((d) => (
+              <div key={d.fineId ?? d.loanId ?? d.receiptCode} className="fine-row">
+                <span className="code">{d.receiptCode}</span>
+                <span className="who">
+                  {d.memberName}
+                  <br />
+                  {d.bookTitle}
+                </span>
+                <span className="who code">{d.daysLate} ngày</span>
+                <span className="num alert">{formatVNDFull(d.amount)}</span>
+                <PayFineButton
+                  fineId={d.fineId}
+                  loanId={d.loanId}
+                  amount={d.amount}
+                />
+              </div>
+            ))}
+            {unpaidDebts.length === 0 ? (
               <p className="muted">Không có khoản nợ trễ hạn nào.</p>
             ) : null}
           </div>
+
+          {debts.some((d) => d.paid) ? (
+            <>
+              <SectionTitle count={`${debts.filter((d) => d.paid).length} mục`}>
+                Đã thu phí
+              </SectionTitle>
+              <div className="fine-list">
+                {debts
+                  .filter((d) => d.paid)
+                  .map((d) => (
+                    <div
+                      key={d.fineId ?? d.loanId ?? d.receiptCode}
+                      className="fine-row"
+                    >
+                      <span className="code">{d.receiptCode}</span>
+                      <span className="who">
+                        {d.memberName}
+                        <br />
+                        {d.bookTitle}
+                      </span>
+                      <span className="who code">{d.daysLate} ngày</span>
+                      <span className="num">{formatVNDFull(d.amount)}</span>
+                      <span className="who code">
+                        {d.paidOn ? `Thu ${formatDateShort(d.paidOn)}` : "Đã thu"}
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            </>
+          ) : null}
         </section>
       </div>
     </AppShell>

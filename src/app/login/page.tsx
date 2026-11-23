@@ -4,7 +4,7 @@ import { useActionState } from "react";
 import Link from "next/link";
 import { useFormStatus } from "react-dom";
 import { signInAction } from "@/app/actions";
-import { EMPTY_RESULT } from "@/lib/action-result";
+import { EMPTY_RESULT, hasError } from "@/lib/action-result";
 
 function SubmitButton() {
   const { pending } = useFormStatus();
@@ -51,7 +51,7 @@ export default function LoginPage() {
             />
           </div>
 
-          {state && !state.ok ? (
+          {hasError(state) ? (
             <p className="form-error" role="alert">
               {state.message}
             </p>

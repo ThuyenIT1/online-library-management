@@ -49,6 +49,8 @@ export type Member = {
   maxBooks: number;
   /** Số cuốn đang mượn. Tính từ bảng loans, không lưu trong members. */
   borrowCount: number;
+  /** Ghi chú nội bộ về hội viên. */
+  notes: string | null;
 };
 
 export type Loan = {
@@ -63,6 +65,30 @@ export type Loan = {
   status: LoanStatus;
   copyLabel: string;
   fineAmount: number;
+  /** Số lần đã gia hạn. Đếm từ nhật ký thao tác, không lưu trong bảng loans. */
+  renewCount: number;
+};
+
+/**
+ * Một khoản nợ của hội viên.
+ *
+ * Nợ có hai nguồn:
+ *  - Dòng phí đã ghi khi trả sách trễ hạn (fineId khác null).
+ *  - Phiếu đang mượn nhưng đã quá hạn (fineId null, tiền tính theo ngày).
+ */
+export type Debt = {
+  /** Mã dòng phí. Null nghĩa là phiếu còn đang mượn, chưa ghi dòng phí. */
+  fineId: string | null;
+  loanId: string | null;
+  receiptCode: string;
+  memberId: string;
+  memberName: string;
+  memberCode: string;
+  bookTitle: string;
+  daysLate: number;
+  amount: number;
+  paid: boolean;
+  paidOn: string | null;
 };
 
 export type Fine = {

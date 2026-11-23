@@ -27,6 +27,13 @@ export default async function BooksPage({
   const safePage = Math.min(page, pages);
   const slice = books.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
 
+  // Link xuất CSV giữ nguyên bộ lọc đang áp dụng.
+  const exportParams = new URLSearchParams();
+  if (q) exportParams.set("q", q);
+  if (subject !== "all") exportParams.set("subject", subject);
+  if (shelf !== "all") exportParams.set("shelf", shelf);
+  const exportHref = `/books/export?${exportParams.toString()}`;
+
   const onLoanByBook = new Map<string, number>();
   for (const l of loans) {
     if (!l.returnedAt) {
@@ -55,10 +62,12 @@ export default async function BooksPage({
         meta={`${books.length} đầu sách khớp bộ lọc`}
         actions={
           <>
-            <Link className="btn btn-quiet" href="/books">
+            <Link className="btn btn-quiet" href="/books/new">
               Nhập sách mới
             </Link>
-            <button className="btn">Xuất danh mục</button>
+            <Link className="btn" href={exportHref}>
+              Xuất danh mục
+            </Link>
           </>
         }
       />

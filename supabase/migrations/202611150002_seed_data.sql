@@ -128,9 +128,13 @@ on conflict (id) do nothing;
 
 -- --- Phí trễ hạn ---
 -- Dùng id cố định để chạy lại script không nhân bản dòng.
-insert into public.fines (id, member_id, days_late, amount, paid)
-values
-('77777777-7777-4777-8777-000000000001', '55555555-5555-4555-8555-000000000007'::uuid, 11, 187000, false),
-('77777777-7777-4777-8777-000000000002', '55555555-5555-4555-8555-000000000001'::uuid, 6, 102000, false),
-('77777777-7777-4777-8777-000000000003', '55555555-5555-4555-8555-000000000008'::uuid, 2, 34000, false)
+-- Gắn loan_id với phiếu tương ứng để thủ thư thu phí đúng khoản nợ.
+insert into public.fines (id, loan_id, member_id, days_late, amount, paid)
+select f.id, l.id, f.member_id, f.days_late, f.amount, f.paid
+from (values
+  ('77777777-7777-4777-8777-000000000001'::uuid, 'PM-2026-1021-117', '55555555-5555-4555-8555-000000000007'::uuid, 11, 187000, false),
+  ('77777777-7777-4777-8777-000000000002'::uuid, 'PM-2026-1026-084', '55555555-5555-4555-8555-000000000001'::uuid, 6, 102000, false),
+  ('77777777-7777-4777-8777-000000000003'::uuid, 'PM-2026-1028-176', '55555555-5555-4555-8555-000000000008'::uuid, 2, 34000, false)
+) as f(id, receipt_code, member_id, days_late, amount, paid)
+join public.loans l on l.receipt_code = f.receipt_code
 on conflict (id) do nothing;
